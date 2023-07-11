@@ -9,6 +9,7 @@ jobs:
     steps:
       - aws-cli/install
       - run: aws sts get-caller-identity
+      - run: echo $CIRCLE_PULL_REQUESTS
 
 workflows:
   cd_pr_preview:
