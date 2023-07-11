@@ -4,10 +4,8 @@ orbs:
   aws-cli: circleci/aws-cli@4.0.0
 
 commands:
-  deploy-to-s3-folder:
+  get-pr-subdomain:
     parameters:
-      s3-bucket-name:
-        type: string
       pr-subdomain:
         type: string
         default: ".pr.appstag.my-own-aws-tests.com"
@@ -15,22 +13,28 @@ commands:
         type: string
         default: https://github.com/antoniovizuete/poc-preview-pr-front/pull/
     steps:
+      - run: |
+          PR_URL_PATH="<< parameters.pr-url-path >>"
+          PR_NUMBER=${CIRCLE_PULL_REQUEST//$PR_URL_PATH/}
+          SUBDOMAIN="pr-$PR_NUMBER<< parameters.pr-subdomain >>"
+
+          echo "export PR_SUBDOMAIN=$SUBDOMAIN" >> $BASH_ENV
+  deploy-to-s3-folder:
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - get-pr-subdomain
       - run:
           name: Deploy to S3
           command: |
-            PR_URL_PATH="<< parameters.pr-url-path >>"
-            PR_NUMBER=${CIRCLE_PULL_REQUEST//$PR_URL_PATH/}
-            SUBDOMAIN="pr-$PR_NUMBER<< parameters.pr-subdomain >>"
-            S3_PATH="s3://<< parameters.s3-bucket-name >>/$SUBDOMAIN/index.html"
+            S3_PATH="s3://<< parameters.s3-bucket-name >>/$PR_SUBDOMAIN/index.html"
             aws s3 cp ./index.html $S3_PATH
 
-            echo "export PR_SUBDOMAIN=$SUBDOMAIN" >> $BASH_ENV
       - run:
-          name: Please inspect this step
+          name: Please inspect this step to show the PR Preview URL
           command: |
-            echo "===================================="
-            echo "PR Preview deployed to: $PR_SUBDOMAIN"
-            echo "===================================="
+            echo "https://$PR_SUBDOMAIN"
 
 jobs:
   deploy:
@@ -38,15 +42,11 @@ jobs:
     parameters:
       s3-bucket-name:
         type: string
-      pr-subdomain:
-        type: string
-        default: ".pr.appstag.my-own-aws-tests.com"
     steps:
       - checkout
       - aws-cli/install
       - deploy-to-s3-folder:
           s3-bucket-name: << parameters.s3-bucket-name >>
-          pr-subdomain: << parameters.pr-subdomain >>
 
 workflows:
   cd_pr_preview:
