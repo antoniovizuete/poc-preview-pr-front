@@ -11,10 +11,14 @@ commands:
       pr-subdomain:
         type: string
         default: ".pr.appstag.my-own-aws-tests.com"
+      pr-url-path:
+        type: string
+        default: https://github.com/antoniovizuete/poc-preview-pr-front/pull/
     steps:
       - run:
           name: Deploy to S3
           command: |
+            PR_NUMBER=${CIRCLE_PULL_REQUEST//<< parameters.pr-url-path >>/}
             aws s3 cp ./index.html s3://<< parameters.s3-bucket-name >>/pr-$PR_NUMBER<< parameters.pr-subdomain >>/index.html
 
 jobs:
@@ -29,9 +33,6 @@ jobs:
     steps:
       - checkout
       - aws-cli/install
-      - run:
-          name: Process PR data
-          command: ./ci-scripts/process-pr-data.sh
       - deploy-to-s3-folder:
           s3-bucket-name: << parameters.s3-bucket-name >>
           pr-subdomain: << parameters.pr-subdomain >>
