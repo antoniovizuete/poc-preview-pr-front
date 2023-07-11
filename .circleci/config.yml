@@ -7,10 +7,11 @@ jobs:
   deploy:
     executor: aws-cli/default
     steps:
+      - checkout
       - aws-cli/install
-      - run: aws sts get-caller-identity
-      - run: echo $CIRCLE_PULL_REQUESTS
-      - run: echo $CIRCLE_REPOSITORY_URL
+      - run:
+          name: Process PR data
+          command: ./ci-scripts/process-pr-data.sh
 
 workflows:
   cd_pr_preview:
