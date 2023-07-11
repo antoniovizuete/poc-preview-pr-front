@@ -1,0 +1,727 @@
+version: 2.1
+
+orbs:
+  aws-cli: circleci/aws-cli@1.3.2
+  jq: circleci/jq@1.9.1
+  sonarcloud: sonarsource/sonarcloud@1.0.2
+  sonar-check: lansweeper/sonar@0.0.6
+  node: circleci/node@5.0.0
+
+executors:
+  node:
+    docker:
+      - image: "cimg/node:16.14"
+  ubuntu:
+    machine:
+      image: ubuntu-2004:202201-01
+  cypress:
+    docker:
+      - image: "cypress/base:14.15.0"
+
+commands:
+  install-deps:
+    description: "Install and cache dependencies"
+    steps:
+      - restore_cache:
+          keys:
+            - lecfront-deps-cache-{{ checksum "yarn.lock" }}
+            - lecfront-deps-cache- # when lock file changes, use increasingly general patterns to restore cache
+      - run:
+          name: Install Dependencies
+          command: yarn --frozen-lockfile
+      - save_cache:
+          key: lecfront-deps-cache-{{ checksum "yarn.lock" }}
+          paths:
+            - node_modules
+
+  deps-from-cache:
+    description: "Get cached dependencies"
+    steps:
+      - checkout
+      - restore_cache:
+          key: lecfront-deps-cache-{{ checksum "yarn.lock" }}
+
+  sentry-install:
+    description: Sentry installation
+    steps:
+      - run: curl -sL https://sentry.io/get-cli/ | bash
+
+  build-lint:
+    description: Download deps, build and lint
+    steps:
+      - deps-from-cache
+      - run: yarn build
+      - run: yarn lint:ci
+      - aws-cli/setup
+      - run:
+          name: Upload build to S3
+          command: |
+            zip -r build-$CIRCLE_SHA1.zip dist/
+            aws s3 cp build-$CIRCLE_SHA1.zip s3://$S3_STORYBOOK_BUCKET_NAME/front-pr-builds/build-$CIRCLE_SHA1.zip
+
+  download-pr-build:
+    description: Get generated build for this commit
+    steps:
+      - aws-cli/setup
+      - run:
+          name: Download build from S3 and exctract
+          command: |
+            aws s3 cp s3://$S3_STORYBOOK_BUCKET_NAME/front-pr-builds/build-$CIRCLE_SHA1.zip build.zip
+            unzip build.zip
+  download-pr-build-release:
+    description: Get generated build for this commit
+    steps:
+      - aws-cli/setup
+      - run:
+          name: Download build from S3 and exctract
+          command: |
+            PR_SHA1="$(git show -s --pretty=%P | cut -d' ' -f2)"
+            aws s3 cp s3://$S3_STORYBOOK_BUCKET_NAME/front-pr-builds/build-$PR_SHA1.zip build.zip
+            unzip build.zip
+
+  download-pr-results-release:
+    description: Get generated tests results for this commit
+    steps:
+      - aws-cli/setup
+      - run:
+          name: Download test reports from S3 and exctract
+          command: |
+            PR_SHA1="$(git show -s --pretty=%P | cut -d' ' -f2)"
+            aws s3 sync s3://$S3_STORYBOOK_BUCKET_NAME/front-pr-reports/reports-$PR_SHA1 ./reports
+
+jobs:
+  install-dependencies:
+    executor: ubuntu
+    environment:
+      NODE_OPTIONS: "--max_old_space_size=4096"
+    steps:
+      - checkout
+      - install-deps
+
+  build:
+    executor: ubuntu
+    environment:
+      NODE_OPTIONS: "--max_old_space_size=4096"
+    steps:
+      - build-lint
+
+  tests:
+    executor: node
+    parallelism: 16
+    steps:
+      - aws-cli/setup
+      - checkout
+      - restore_cache:
+          keys:
+            - lecfront-deps-cache-{{ checksum "yarn.lock" }}
+            - lecfront-deps-cache- # when lock file changes, use increasingly general patterns to restore cache
+      - run: mkdir -p reports/reports_$CIRCLE_NODE_INDEX
+      - run: mkdir -p reports/coverage_$CIRCLE_NODE_INDEX
+      - run:
+          name: Running jest tests
+          command: |
+            TEST_FILES=$(circleci tests glob "src/**/*.test.tsx" | circleci tests split)
+            echo $TEST_FILES
+            yarn test:coverage $TEST_FILES
+      - run: mv junit.xml reports/junit.xml
+      - run: cp reports/test-report.xml "reports/reports_$CIRCLE_NODE_INDEX/test-report-$CIRCLE_NODE_INDEX.xml"
+      - run: cp coverage/lcov.info "reports/coverage_$CIRCLE_NODE_INDEX/lcov-$CIRCLE_NODE_INDEX.info"
+      - run:
+          name: Upload test results to S3
+          command: |
+            aws s3 sync reports s3://$S3_STORYBOOK_BUCKET_NAME/front-pr-reports/reports-$CIRCLE_SHA1
+      - store_test_results:
+          path: reports/junit.xml
+      - store_artifacts:
+          path: reports
+      - persist_to_workspace:
+          root: .
+          paths:
+            - reports/reports_*
+            - reports/coverage_*
+
+  sonar:
+    executor: node
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - sonarcloud/scan
+      - sonar-check/get_sonar_status
+
+  sonar-release:
+    executor: node
+    steps:
+      - aws-cli/setup
+      - checkout
+      - download-pr-results-release
+      - sonarcloud/scan
+      - sonar-check/get_sonar_status
+
+  contract-test:
+    executor: node
+    parameters:
+      environment:
+        type: string
+        description: the environment against check schemas
+    steps:
+      - checkout
+      - run: npx -p apollo@2.33.4 -p apollo-codegen-core@0.40.3 -p apollo-language-server@1.26.3 -p graphql -c 'apollo client:check -v <<parameters.environment>>' -y
+
+  contract-test-with-approval:
+    executor: node
+    parameters:
+      environment:
+        type: string
+        description: the environment against check schemas
+    steps:
+      - checkout
+      - run: npx -p apollo@2.33.4 -p apollo-codegen-core@0.40.3 -p apollo-language-server@1.26.3 -p graphql -c 'apollo client:check -v <<parameters.environment>>' -y
+
+  e2e:
+    parameters:
+      tag:
+        type: string
+        description: cypress run tag
+        default: ""
+    executor: cypress
+    parallelism: 4
+    environment:
+      GATEWAY_GRAPHQL_URL: https://appstag.lansweeper.com/api/gateway
+      ASSETSBE_VC_URL: https://appstag.lansweeper.com/api/vc
+      AUTHORIZE_APP_INTEGRATIONS_URL: http://appstag.lansweeper.com/api/authorize
+    steps:
+      - deps-from-cache
+      - run: mv /home/circleci/project/node_modules ./
+      - download-pr-build
+      - run:
+          name: Start frontend
+          command: yarn run start:ci
+          background: true
+          working_directory: .
+      - run:
+          name: Install cypress
+          command: yarn cypress:install
+          working_directory: .
+      - run:
+          name: Run cypress
+          command: |
+            CYPRESS_TESTS=$(circleci tests glob cypress/integration/_critical-path/**/*.feature | circleci tests split --split-by=timings  | tr -s '[:blank:]' ',')
+            yarn run cypress:run:ci $CYPRESS_TESTS
+          working_directory: .
+      - store_artifacts:
+          path: cypress/screenshots
+      - store_artifacts:
+          path: cypress/videos
+
+  release:
+    executor: node
+    steps:
+      - deps-from-cache
+      - download-pr-build-release
+      - download-pr-results-release
+      - sentry-install
+      - run: chmod +x ./scripts/create-sentry-release.sh
+      - run: yarn run release
+
+  deploy-semaphore:
+    executor: aws-cli/default
+    parameters:
+      environment:
+        type: string
+        description: the environment where to deploy
+    steps:
+      - aws-cli/setup
+      - run:
+          name: Check for ongoing deployment
+          command: |
+            IS_RUNNING=$(aws dynamodb get-item \
+              --table-name lec-front-deploy \
+              --key '{"environment":{"S":"<<parameters.environment>>"}}' \
+              --projection-expression "running" | grep BOOL | sed 's/.*"BOOL": //')
+
+            [ $IS_RUNNING == "true" ] \
+              && echo "Semaphore is in red. Waiting 30 seconds for a new attempt" \
+              && sleep 30 \
+              && IS_RUNNING=$(aws dynamodb get-item \
+              --table-name lec-front-deploy \
+              --key '{"environment":{"S":"<<parameters.environment>>"}}' \
+              --projection-expression "running" | grep BOOL | sed 's/.*"BOOL": //')
+
+            [ $IS_RUNNING == "true" ] \
+              && echo "Deployment canceled, another deployment is in progress after 2 tries" \
+              && exit 1
+
+            [ $IS_RUNNING == "false" ] \
+              && echo "Semaphore is in green. Ready to deploy"
+
+  deploy-web:
+    executor: aws-cli/default
+    parameters:
+      aws-s3-bucket-name:
+        type: string
+        description: The bucket name of the S3 where to store the static files
+      cdn-id:
+        type: string
+        description: The id of the CDN where is deployed the front
+      cdn-url:
+        type: string
+        description: the url of the CDN for do the replace
+      environment:
+        type: string
+        description: the environment where to deploy
+      revisionEnd:
+        type: string
+        description: the revision to delete
+        default: "99"
+      revisionLimit:
+        type: string
+        description: the revision limit
+        default: "100"
+    environment:
+      CDN_URL: <<parameters.cdn-url>>
+      ENVIRONMENT: <<parameters.environment>>
+    steps:
+      - checkout
+      - aws-cli/setup
+      - jq/install
+      - run:
+          name: Turn on the deployment semaphore
+          command: |
+            aws dynamodb update-item \
+              --table-name lec-front-deploy \
+              --key '{"environment":{"S":"<<parameters.environment>>"}}' \
+              --update-expression "SET running = :running" \
+              --expression-attribute-values '{":running": {"BOOL": true }}'
+
+      - run:
+          name: Download build from release
+          command: |
+            sleep 10s
+            ASSET_ID=$(curl -H "Authorization: token $GH_TOKEN" -H "Accept: application/vnd.github.v3.raw" https://api.github.com/repos/Lansweeper/LECFront/releases/tags/$CIRCLE_TAG | jq '.assets | map(select(.name == "build.zip"))[0].id')
+            wget -q --auth-no-challenge --header='Accept:application/octet-stream' https://$GH_TOKEN:@api.github.com/repos/Lansweeper/LECFront/releases/assets/$ASSET_ID -O build.zip
+            unzip build.zip -d dist
+
+      - run:
+          name: Replace vars
+          command: |
+            INDEX_FILE=dist/index.html
+
+            VERSION=${CIRCLE_TAG:8}
+            sed -i "s|@@VERSION@@|$VERSION|g" $INDEX_FILE
+
+            sed -i "s|@@ENVIRONMENT@@|$ENVIRONMENT|g" $INDEX_FILE
+
+            BASE64_APP_CONFIG=$(cat env/<<parameters.environment>>.config.json | base64 -w 0)
+
+            sed -i "s|@@CONFIG@@|$BASE64_APP_CONFIG|g" $INDEX_FILE
+
+      - run:
+          name: Update revision
+          command: |
+            VERSION=${CIRCLE_TAG:8}
+            REVISION_SHA1=$(ls dist/revision)
+            echo $REVISION_SHA1 > latest_revision.txt
+            REVISION_FILE=dist/revision/revision_history.json
+            aws s3 cp s3://<<parameters.aws-s3-bucket-name>>/revision/revision_history.json $REVISION_FILE || true
+
+            if [ ! -f dist/revision/revision_history.json ]; then
+              echo "[{\"version\": \"$VERSION\", \"revision\": \"$REVISION_SHA1\"}]" > $REVISION_FILE
+              echo "null" > deprecated_revision.txt
+            else
+              jq '.[<<parameters.revisionEnd>>]' $REVISION_FILE > deprecated_revision.txt
+
+              now=$(date '+%Y-%m-%d %H:%M:%S')
+
+              NEW_REVISION=$(jq "([{\"version\": \"$VERSION\", \"revision\": \"$REVISION_SHA1\", \"deployed_at\": \"$now\" }] + .)[0:<<parameters.revisionLimit>>]" $REVISION_FILE)
+
+              echo $NEW_REVISION > $REVISION_FILE
+            fi
+      - run:
+          command: |
+            rm dist/*.map
+            rm dist/revision/**/*.map
+      - run:
+          name: Deploy frontend
+          command: |
+            aws s3 sync ./dist/revision s3://<<parameters.aws-s3-bucket-name>>/revision
+            aws s3 sync ./dist/assets s3://<<parameters.aws-s3-bucket-name>>/assets
+            aws s3 cp ./dist/service-worker.js s3://<<parameters.aws-s3-bucket-name>>/service-worker.js
+            aws s3 cp ./dist/index.html s3://<<parameters.aws-s3-bucket-name>>/index.html
+            aws s3 cp ./dist/robots.txt s3://<<parameters.aws-s3-bucket-name>>/robots.txt
+      - run:
+          name: Invalidate CDN cache
+          command: |
+            REVISION_SHA1=$(cat latest_revision.txt)
+            aws cloudfront create-invalidation --distribution-id <<parameters.cdn-id>> --paths \
+              "/service-worker.js" \
+              "/revision/revision_history.json" \
+              "/revision/$REVISION_SHA1/*.js" \
+              "/revision/$REVISION_SHA1/*.css" \
+              "/revision/$REVISION_SHA1/*.png" \
+              "/assets/**/*" \
+              "/index.html" \
+              "/robots.txt" \
+      - run:
+          name: Clean deprecated revision
+          command: |
+            DEPRECATED_REVISION=$(cat deprecated_revision.txt)
+            if [ "$DEPRECATED_REVISION" = "null" ]; then
+              exit 0;
+            fi
+            REVISION_SHA=$(echo $DEPRECATED_REVISION | jq --raw-output '.revision')
+            aws s3 rm s3://<<parameters.aws-s3-bucket-name>>/revision/$REVISION_SHA --recursive
+      - run:
+          name: Turn off the deployment semaphore
+          command: |
+            aws dynamodb update-item \
+              --table-name lec-front-deploy \
+              --key '{"environment":{"S":"<<parameters.environment>>"}}' \
+              --update-expression "SET running = :running" \
+              --expression-attribute-values '{":running": {"BOOL": false }}'
+          when: always
+
+      - run:
+          name: Notify deploy to sentry
+          command: |
+            curl -sL https://sentry.io/get-cli/ | bash
+            VERSION=${CIRCLE_TAG:8}
+            sentry-cli releases deploys $VERSION new -e $ENVIRONMENT
+
+      - run:
+          name: Notify deploy to honeycomb
+          command: |
+            VERSION=${CIRCLE_TAG:8}
+            curl https://api.honeycomb.io/1/markers/adp-$ENVIRONMENT -X POST  \
+              -H "X-Honeycomb-Team: $HONEYCOMB_API_KEY"  \
+              -d "{\"message\":\"lecfront v$VERSION deployed\", \"type\":\"version_deployed\"}"
+
+  notify-deploy-to-slack:
+    executor: node
+    parameters:
+      environment:
+        type: string
+        description: The environment being deployed
+      application:
+        type: string
+        description: The application being deployed
+    steps:
+      - checkout
+      - run:
+          name: Notify slack
+          command: |
+            VERSION=$(node -p "require('./package.json').version")
+            DATA="{\"username\": \"CI-deployer\", \"icon_emoji\":\":hamster:\",\"text\":\"<<parameters.application>> v$VERSION has deployed to <<parameters.environment>>\"}"
+            echo $DATA
+            curl -X POST https://hooks.slack.com/services/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 -H "Content-Type: application/json" -d "$DATA"
+
+workflows:
+  version: 2
+
+  ci_on_pr:
+    jobs:
+      - install-dependencies:
+          context:
+            - lec-npm-ro
+            - lec-front-staging
+          filters:
+            branches:
+              ignore:
+                - master
+                - /dependabot\/.*/
+            tags:
+              ignore: /.*/
+
+      - contract-test:
+          name: contract-test-ci-staging
+          context:
+            - global-apollo-engine
+            - lec-npm-ro
+          environment: staging
+          filters:
+            branches:
+              ignore:
+                - master
+                - /dependabot\/.*/
+            tags:
+              ignore: /.*/
+
+      - contract-test:
+          name: contract-test-ci-production
+          context:
+            - global-apollo-engine
+            - lec-npm-ro
+          environment: production
+          filters:
+            branches:
+              ignore:
+                - master
+                - /dependabot\/.*/
+            tags:
+              ignore: /.*/
+
+      # DEPENDABOT FLOW
+
+      - PR-should-ci-now?:
+          type: approval
+          filters:
+            branches:
+              only: /dependabot\/.*/
+            tags:
+              ignore: /.*/
+
+      - install-dependencies:
+          name: install-dependencies-with-approval
+          context:
+            - lec-npm-ro
+            - lec-front-staging
+          requires:
+            - PR-should-ci-now?
+          filters:
+            branches:
+              only: /dependabot\/.*/
+            tags:
+              ignore: /.*/
+
+      - contract-test-with-approval:
+          name: contract-test-ci-staging
+          context:
+            - global-apollo-engine
+            - lec-npm-ro
+          environment: staging
+          requires:
+            - PR-should-ci-now?
+          filters:
+            branches:
+              only: /dependabot\/.*/
+            tags:
+              ignore: /.*/
+
+      - contract-test-with-approval:
+          name: contract-test-ci-production
+          context:
+            - global-apollo-engine
+            - lec-npm-ro
+          environment: production
+          requires:
+            - PR-should-ci-now?
+          filters:
+            branches:
+              only: /dependabot\/.*/
+            tags:
+              ignore: /.*/
+
+      - build:
+          context:
+            - lec-npm-ro
+            - lec-front-staging
+          requires:
+            - install-dependencies
+            - install-dependencies-with-approval
+          filters:
+            branches:
+              ignore:
+                - master
+            tags:
+              ignore: /.*/
+
+      - tests:
+          name: jest-tests
+          context:
+            - lec-npm-ro
+            - lec-front-staging
+          requires:
+            - install-dependencies
+            - install-dependencies-with-approval
+          filters:
+            branches:
+              ignore: master
+            tags:
+              ignore: /.*/
+
+      - e2e:
+          name: e2e-critical-path
+          context:
+            - lec-npm-ro
+            - lec-front-staging
+          tag: "on-pr"
+          requires:
+            - build
+          filters:
+            branches:
+              ignore: master
+            tags:
+              ignore: /.*/
+
+      - sonar:
+          context:
+            - SonarCloud
+            - lec-npm-ro
+          requires:
+            - jest-tests
+          filters:
+            branches:
+              ignore:
+                - master
+            tags:
+              ignore: /.*/
+
+  ci_and_release_on_master:
+    jobs:
+      # - sonar-release:
+      #     context:
+      #       - SonarCloud
+      #       - lec-npm-ro
+      #       - lec-front-staging
+      #     filters:
+      #       branches:
+      #         only: master
+      #       tags:
+      #         ignore: /.*/
+
+      - contract-test:
+          name: contract-test-master
+          context:
+            - global-apollo-engine
+            - lec-npm-ro
+          environment: staging
+          filters:
+            branches:
+              only: master
+            tags:
+              ignore: /.*/
+
+      - release:
+          requires:
+            - contract-test-master
+            # - sonar-release
+          context:
+            - lec-front-staging
+            - lec-github-release
+            - lec-npm-ro
+            - lec-sentry
+          filters:
+            branches:
+              only: master
+            tags:
+              ignore: /.*/
+
+  cd_on_staging:
+    jobs:
+      - contract-test:
+          name: contract-test-stag
+          context:
+            - global-apollo-engine
+            - lec-npm-ro
+          environment: staging
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/
+
+      - deploy-semaphore:
+          name: STAG-semaphore
+          environment: staging
+          requires:
+            - contract-test-stag
+          context:
+            - lec-front-staging
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/
+
+      - deploy-web:
+          name: STAG-front-deploy
+          aws-s3-bucket-name: "lec-frontend-staging"
+          cdn-id: "E1JXI1HJYV2DNA"
+          cdn-url: "https://d14he3cm6rleoa.cloudfront.net/"
+          environment: staging
+          revisionEnd: "4"
+          revisionLimit: "5"
+          requires:
+            - STAG-semaphore
+          context:
+            - lec-front-staging
+            - lec-sentry
+            - lec-github-release
+            - lec-npm-ro
+            - lec-honeycomb-markers
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/
+
+  cd_on_production:
+    jobs:
+      - PROD-should-deploy?:
+          type: approval
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/
+
+      - contract-test:
+          name: contract-test-prod
+          context:
+            - lec-npm-ro
+            - global-apollo-engine
+          environment: production
+          requires:
+            - PROD-should-deploy?
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/
+
+      - deploy-semaphore:
+          name: PROD-semaphore
+          environment: production
+          context:
+            - lec-front-production
+          requires:
+            - contract-test-prod
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/
+
+      - deploy-web:
+          name: PROD-front-deploy
+          aws-s3-bucket-name: "lec-frontend"
+          cdn-id: "E2SZQMRQEN8PQF"
+          cdn-url: "https://d28twgmo7ardzm.cloudfront.net/"
+          environment: production
+          requires:
+            - PROD-semaphore
+          context:
+            - lec-front-production
+            - lec-sentry
+            - lec-github-release
+            - lec-npm-ro
+            - lec-honeycomb-markers
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/
+
+      - notify-deploy-to-slack:
+          name: production-notify-deploy-to-slack
+          requires:
+            - PROD-front-deploy
+          environment: "production"
+          application: "LECFront"
+          context:
+            - lec-npm-ro
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^lec-app@.*/

@@ -14,6 +14,8 @@ workflows:
   cd_pr_preview:
     jobs:
       - deploy:
+          context:
+            - aws-credentials
           filters:
             branches:
               only: main
