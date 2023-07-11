@@ -3,20 +3,49 @@ version: 2.1
 orbs:
   aws-cli: circleci/aws-cli@4.0.0
 
+commands:
+  deploy-to-s3-folder:
+    parameters:
+      s3-bucket-name:
+        type: string
+      pr-subdomain:
+        type: string
+        default: ".pr.appstag.my-own-aws-tests.com"
+    steps:
+      - run:
+          name: Deploy to S3
+          command: |
+            aws s3 cp ./index.html s3://<< parameters.s3-bucket-name >>/pr-$PR_NUMBER<< parameters.pr-subdomain >>/index.html
+
 jobs:
   deploy:
     executor: aws-cli/default
+    parameters:
+      s3-bucket-name:
+        type: string
+      pr-subdomain:
+        type: string
+        default: ".pr.appstag.my-own-aws-tests.com"
     steps:
       - checkout
       - aws-cli/install
       - run:
           name: Process PR data
           command: ./ci-scripts/process-pr-data.sh
+      - deploy-to-s3-folder:
+          s3-bucket-name: << parameters.s3-bucket-name >>
+          pr-subdomain: << parameters.pr-subdomain >>
+      # - run:
+      #     name: Deploy to S3
+      #     command: |
+      #       aws s3 cp ./index.html s3://<< parameters.s3-bucket-name >>/pr-$PR_NUMBER<< parameters.pr-subdomain >>/index.html
 
 workflows:
   cd_pr_preview:
     jobs:
       - deploy:
+          #s3-bucket-name: $S3_BUCKET_NAME
+          s3-bucket-name: "my-own-test-bucket-1q6acvbs"
           context:
             - aws-credentials
           filters:
