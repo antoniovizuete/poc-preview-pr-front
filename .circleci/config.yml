@@ -19,8 +19,8 @@ commands:
           name: Deploy to S3
           command: |
             PR_URL_PATH="<< parameters.pr-url-path >>"
-            PR_NUMBER=${CIRCLE_PULL_REQUEST//PR_URL_PATH/}
-            aws s3 cp ./index.html s3://<< parameters.s3-bucket-name >>/pr-$PR_NUMBER<< parameters.pr-subdomain >>/index.html
+            PR_NUMBER=${CIRCLE_PULL_REQUEST//$PR_URL_PATH/}
+            # aws s3 cp ./index.html s3://<< parameters.s3-bucket-name >>/pr-$PR_NUMBER<< parameters.pr-subdomain >>/index.html
 
 jobs:
   deploy:
