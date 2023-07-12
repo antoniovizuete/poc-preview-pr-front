@@ -65,6 +65,7 @@ jobs:
       s3-bucket-name:
         type: string
     steps:
+      - aws-cli/install
       - get-pr-subdomain
       - remove-pr-preview:
           s3-bucket-name: << parameters.s3-bucket-name >>
@@ -78,6 +79,7 @@ jobs:
       s3-bucket-name:
         type: string
     steps:
+      - aws-cli/install
       - get-pr-subdomain
       - remove-pr-preview:
           s3-bucket-name: << parameters.s3-bucket-name >>
