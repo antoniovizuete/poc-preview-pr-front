@@ -53,6 +53,8 @@ commands:
       - run:
           name: Cancel Workflow
           command: |
+            echo "$CIRCLE_WORKFLOW_ID"
+            echo "$CIRCLE_TOKEN"
             curl --request POST \
             --url https://circleci.com/api/v2/workflow/$CIRCLE_WORKFLOW_ID/cancel \
             --header "Circle-Token: ${CIRCLE_TOKEN}"
