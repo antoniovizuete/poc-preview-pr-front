@@ -13,12 +13,15 @@ commands:
         type: string
         default: https://github.com/antoniovizuete/poc-preview-pr-front/pull/
     steps:
-      - run: |
-          PR_URL_PATH="<< parameters.pr-url-path >>"
-          PR_NUMBER=${CIRCLE_PULL_REQUEST//$PR_URL_PATH/}
-          SUBDOMAIN="pr-$PR_NUMBER<< parameters.pr-subdomain >>"
+      - run:
+          name: Get PR Subdomain
+          command: |
+            PR_URL_PATH="<< parameters.pr-url-path >>"
+            PR_NUMBER=${CIRCLE_PULL_REQUEST//$PR_URL_PATH/}
+            SUBDOMAIN="pr-$PR_NUMBER<< parameters.pr-subdomain >>"
 
-          echo "export PR_SUBDOMAIN=$SUBDOMAIN" >> $BASH_ENV
+            echo "export PR_SUBDOMAIN=$SUBDOMAIN" >> $BASH_ENV
+
   deploy-to-s3-folder:
     parameters:
       s3-bucket-name:
@@ -35,7 +38,16 @@ commands:
           name: Please inspect this step to show the PR Preview URL
           command: |
             echo "https://$PR_SUBDOMAIN"
-
+  remove-pr-preview:
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - get-pr-subdomain
+      - run:
+          name: Remove PR Preview
+          command: |
+            aws s3 rm s3://<< parameters.s3-bucket-name >>/$PR_SUBDOMAIN --recursive
 jobs:
   deploy:
     executor: aws-cli/default
@@ -47,6 +59,28 @@ jobs:
       - aws-cli/install
       - deploy-to-s3-folder:
           s3-bucket-name: << parameters.s3-bucket-name >>
+  promote-to-stag:
+    executor: aws-cli/default
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - get-pr-subdomain
+      - remove-pr-preview:
+          s3-bucket-name: << parameters.s3-bucket-name >>
+      - run:
+          name: Promote to Staging
+          command: |
+            echo "Promote to Staging"
+  dismiss:
+    executor: aws-cli/default
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - get-pr-subdomain
+      - remove-pr-preview:
+          s3-bucket-name: << parameters.s3-bucket-name >>
 
 workflows:
   cd_pr_preview:
@@ -56,6 +90,46 @@ workflows:
           s3-bucket-name: "my-own-test-bucket-1q6acvbs"
           context:
             - aws-credentials
+          filters:
+            branches:
+              ignore:
+                - main
+      - Approve?:
+          type: approval
+          requires:
+            - deploy
+          filters:
+            branches:
+              ignore:
+                - main
+      - Dismiss?:
+          type: approval
+          requires:
+            - deploy
+          filters:
+            branches:
+              ignore:
+                - main
+      - promote-to-stag:
+          name: Promote to Staging
+          #s3-bucket-name: $S3_BUCKET_NAME
+          s3-bucket-name: "my-own-test-bucket-1q6acvbs"
+          context:
+            - aws-credentials
+          requires:
+            - Approve?
+          filters:
+            branches:
+              ignore:
+                - main
+      - dismiss:
+          name: Dismiss
+          #s3-bucket-name: $S3_BUCKET_NAME
+          s3-bucket-name: "my-own-test-bucket-1q6acvbs"
+          context:
+            - aws-credentials
+          requires:
+            - Dismiss?
           filters:
             branches:
               ignore:
