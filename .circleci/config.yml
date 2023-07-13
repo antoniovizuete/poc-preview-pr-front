@@ -3,19 +3,143 @@ version: 2.1
 orbs:
   aws-cli: circleci/aws-cli@4.0.0
 
+commands:
+  get-pr-subdomain:
+    parameters:
+      pr-subdomain:
+        type: string
+        default: ".pr.appstag.my-own-aws-tests.com"
+      pr-url-path:
+        type: string
+        default: https://github.com/antoniovizuete/poc-preview-pr-front/pull/
+    steps:
+      - run:
+          name: Get PR Subdomain
+          command: |
+            PR_URL_PATH="<< parameters.pr-url-path >>"
+            PR_NUMBER=${CIRCLE_PULL_REQUEST//$PR_URL_PATH/}
+            SUBDOMAIN="pr-$PR_NUMBER<< parameters.pr-subdomain >>"
+
+            echo "export PR_SUBDOMAIN=$SUBDOMAIN" >> $BASH_ENV
+
+  deploy-to-s3-folder:
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - get-pr-subdomain
+      - run:
+          name: Deploy to S3
+          command: |
+            S3_PATH="s3://<< parameters.s3-bucket-name >>/pr-previews/$PR_SUBDOMAIN/index.html"
+            aws s3 cp ./index.html $S3_PATH
+
+      - run:
+          name: Please inspect this step to show the PR Preview URL
+          command: |
+            echo "https://$PR_SUBDOMAIN"
+  remove-pr-preview:
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - get-pr-subdomain
+      - run:
+          name: Remove PR Preview
+          command: |
+            aws s3 rm s3://<< parameters.s3-bucket-name >>/pr-previews/pr-previews$PR_SUBDOMAIN --recursive
+  cancel-workflow:
+    steps:
+      - run:
+          name: Cancel Workflow
+          command: |
+            echo "$CIRCLE_WORKFLOW_ID"
+            curl -X POST "https://circleci.com/api/v2/workflow/$CIRCLE_WORKFLOW_ID/cancel" -H "Circle-Token: ${CIRCLE_ADMIN_TOKEN}"
 jobs:
   deploy:
     executor: aws-cli/default
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - checkout
+      - aws-cli/install
+      - deploy-to-s3-folder:
+          s3-bucket-name: << parameters.s3-bucket-name >>
+  promote-to-stag:
+    executor: aws-cli/default
+    parameters:
+      s3-bucket-name:
+        type: string
     steps:
       - aws-cli/install
-      - run: aws sts get-caller-identity
+      - remove-pr-preview:
+          s3-bucket-name: << parameters.s3-bucket-name >>
+      - run:
+          name: Promote to Staging
+          command: |
+            echo "Promote to Staging"
+      - cancel-workflow
+  dismiss:
+    executor: aws-cli/default
+    parameters:
+      s3-bucket-name:
+        type: string
+    steps:
+      - aws-cli/install
+      - remove-pr-preview:
+          s3-bucket-name: << parameters.s3-bucket-name >>
+      - cancel-workflow
 
 workflows:
   cd_pr_preview:
     jobs:
       - deploy:
+          #s3-bucket-name: $S3_BUCKET_NAME
+          s3-bucket-name: "my-own-test-bucket-1q6acvbs"
           context:
             - aws-credentials
           filters:
             branches:
-              only: main
+              ignore:
+                - main
+      - Approve?:
+          type: approval
+          requires:
+            - deploy
+          filters:
+            branches:
+              ignore:
+                - main
+      - Dismiss?:
+          type: approval
+          requires:
+            - deploy
+          filters:
+            branches:
+              ignore:
+                - main
+      - promote-to-stag:
+          name: Promote to Staging
+          #s3-bucket-name: $S3_BUCKET_NAME
+          s3-bucket-name: "my-own-test-bucket-1q6acvbs"
+          context:
+            - aws-credentials
+          requires:
+            - Approve?
+          filters:
+            branches:
+              ignore:
+                - main
+      - dismiss:
+          name: Dismiss
+          #s3-bucket-name: $S3_BUCKET_NAME
+          s3-bucket-name: "my-own-test-bucket-1q6acvbs"
+          context:
+            - aws-credentials
+          requires:
+            - Dismiss?
+          filters:
+            branches:
+              ignore:
+                - main
