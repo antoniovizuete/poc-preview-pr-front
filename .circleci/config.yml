@@ -31,7 +31,7 @@ commands:
       - run:
           name: Deploy to S3
           command: |
-            S3_PATH="s3://<< parameters.s3-bucket-name >>/$PR_SUBDOMAIN/index.html"
+            S3_PATH="s3://<< parameters.s3-bucket-name >>/pr-previews/$PR_SUBDOMAIN/index.html"
             aws s3 cp ./index.html $S3_PATH
 
       - run:
@@ -47,7 +47,7 @@ commands:
       - run:
           name: Remove PR Preview
           command: |
-            aws s3 rm s3://<< parameters.s3-bucket-name >>/$PR_SUBDOMAIN --recursive
+            aws s3 rm s3://<< parameters.s3-bucket-name >>/pr-previews/pr-previews$PR_SUBDOMAIN --recursive
   cancel-workflow:
     steps:
       - run:
@@ -73,7 +73,6 @@ jobs:
         type: string
     steps:
       - aws-cli/install
-      - get-pr-subdomain
       - remove-pr-preview:
           s3-bucket-name: << parameters.s3-bucket-name >>
       - run:
@@ -88,7 +87,6 @@ jobs:
         type: string
     steps:
       - aws-cli/install
-      - get-pr-subdomain
       - remove-pr-preview:
           s3-bucket-name: << parameters.s3-bucket-name >>
       - cancel-workflow
